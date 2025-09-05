@@ -12,7 +12,7 @@
 
 #define RX_BUF_SIZE 100
 #define TX_BUF_SIZE 100
-
+#define MAX_RX_OUT_BUF 5
 class rpc{
     public:
         rpc(): countMessage(0){
@@ -33,14 +33,20 @@ class rpc{
             rxQueue = xQueueCreate(1, sizeof(std::vector<uint8_t>) );    
             txQueue = xQueueCreate(1, sizeof(std::vector<uint8_t>) ); 
             rxMessageQueue = xQueueCreate(1, sizeof(std::vector<uint8_t>) ); 
-            txMessageQueue = xQueueCreate(1, sizeof(std::vector<uint8_t>) );             
+            txMessageQueue = xQueueCreate(1, sizeof(std::vector<uint8_t>) );     
+            rxOutMessageQueue = xQueueCreate(MAX_RX_OUT_BUF, sizeof(std::vector<uint8_t>) );        
             startrxMassegTask();
             startProcessRxDataTask();
             startRxUartTask();
             startTxUartTask();
             startProcessTxData();
+            startGlobalProcess();
         }
         
+        QueueHandle_t* getRxOutQueue(){
+            return &rxOutMessageQueue;
+        }
+
         void sendCommand(std::string cmd, std::vector<uint8_t> arg){                                   
             dataSend.resize(3+arg.size()+cmd.size());
             dataSend[0]=0x0B;
@@ -68,6 +74,7 @@ class rpc{
          QueueHandle_t rxMessageQueue = nullptr;
          QueueHandle_t txQueue = nullptr;
          QueueHandle_t txMessageQueue = nullptr;
+         QueueHandle_t rxOutMessageQueue = nullptr;
 
         void responseRx(std::vector<uint8_t> data){            
             std::lock_guard guard(_mutex);
@@ -99,24 +106,21 @@ class rpc{
             static_cast<rpc*>(parameter)->TxUartTask();            
         }
 
-        void globalProcess(){
-           while(1){
-              processListTxMassege(); 
-              vTaskDelay(10/portTICK_PERIOD_MS);              
-           }
+        static void globalProcessEntry(void* parameter ){
+            static_cast<rpc*>(parameter)->globalProcess();            
+        }        
 
+        void startGlobalProcess(){
+            const BaseType_t taskCreated = xTaskCreate(
+                globalProcessEntry,
+                "globalProcessEntry",
+                1024,
+                this,
+                tskIDLE_PRIORITY+1,
+                NULL);        
+            configASSERT(taskCreated == pdPASS);
         }
-
-        void processListTxMassege(){
-            std::lock_guard guard(_mutex);
-            for (auto it = listTxMassege.begin(); it != listTxMassege.end(); it++) {        
-                if( (xTaskGetTickCount() - it->second)*portTICK_PERIOD_MS > lifeTimePack ){
-                    ESP_LOGI(RPC_TAG, "TimeOut cmd№  %d", it->second);
-                    listTxMassege.erase(it);  //ответ на команду не пришел                    
-                }
-            }
-        }
-
+        
         void startProcessTxData(){
             const BaseType_t taskCreated = xTaskCreate(
                 processTxDataTaskEntry,
@@ -174,12 +178,32 @@ class rpc{
             configASSERT(taskCreated == pdPASS);
         }
 
+        void globalProcess(){
+           while(1){
+               ESP_LOGI(RPC_TAG, "globalProcess ");
+              processListTxMassege(); 
+              vTaskDelay(100/portTICK_PERIOD_MS);              
+           }
+
+        }
+        
+        void processListTxMassege(){
+            std::lock_guard guard(_mutex);
+            for (auto it = listTxMassege.begin(); it != listTxMassege.end(); it++) {        
+                if( (xTaskGetTickCount() - it->second)*portTICK_PERIOD_MS > lifeTimePack ){
+                    ESP_LOGI(RPC_TAG, "TimeOut cmd№  %d", it->second);
+                    listTxMassege.erase(it);  //ответ на команду не пришел                    
+                }
+            }
+        }
+
         void rxMassegTask(){
             std::vector<uint8_t> data;
             while(1){
                 xQueueReceive(rxMessageQueue, &data, portMAX_DELAY); 
                 switch(data[0]){
                     case 0x0B://запрос
+                        xQueueSend(rxOutMessageQueue, &data, 0);   
                     break;
                     case 0x0C://стрим
                     break;
